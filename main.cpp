@@ -169,6 +169,11 @@ private:
             listFiles();
         };
 
+        commands["tree"] = [this](vector<string>) {
+        
+            showTree();
+        };
+
 
         commands["cd"] = [this](vector<string> args) {
 
@@ -273,6 +278,7 @@ private:
 
         cout << "pwd                    -> Show current directory\n";
         cout << "ls                     -> List files/folders\n";
+        cout << "tree                   -> Show directory tree\n";
         cout << "cd <dir>               -> Change directory\n";
         cout << "mkdir <name>           -> Create folder\n";
         cout << "touch <file>           -> Create file\n";
@@ -325,6 +331,50 @@ private:
                  << e.what()
                  << RESET
                  << endl;
+        }
+    }
+
+    // ==================== TREE =============================
+
+    void showTree() {
+        try {
+            cout << CYAN << currentPath.filename().string()
+                 << RESET << endl;
+
+            showTreeRecursive(currentPath, "");
+        }
+        catch (exception& e) {
+            cout << RED << "Error: "
+                 << e.what()
+                 << RESET << endl;
+        }
+    }
+
+    void showTreeRecursive(const fs::path& path, const string& prefix) {
+
+        for (const auto& entry : fs::directory_iterator(path)) {
+
+            cout << prefix << "├── ";
+
+            if (fs::is_directory(entry.path())) {
+
+                cout << BLUE
+                     << "[DIR] "
+                     << entry.path().filename().string()
+                     << RESET << endl;
+
+                showTreeRecursive(
+                    entry.path(),
+                    prefix + "│   "
+                );
+            }
+            else {
+
+                cout << GREEN
+                     << "[FILE] "
+                     << entry.path().filename().string()
+                     << RESET << endl;
+            }
         }
     }
 
