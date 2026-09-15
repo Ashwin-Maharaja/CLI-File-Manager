@@ -37,6 +37,7 @@ Run:
 #include <functional>
 #include <sstream>
 #include <vector>
+#include <windows.h>
 
 namespace fs = std::filesystem;
 using namespace std;
@@ -52,6 +53,16 @@ using namespace std;
 #define CYAN    "\033[36m"
 
 
+struct Command {
+    string name;
+    vector<string> arguments;
+};
+
+struct CommandInfo {
+    int minArguments;
+    int maxArguments;
+};
+
 class CLIFileManager {
 
 private:
@@ -59,7 +70,7 @@ private:
     fs::path currentPath;
 
     unordered_map<string, function<void(vector<string>)>> commands;
-
+    unordered_map<string, CommandInfo> commandInfo;
 
 public:
 
@@ -95,10 +106,46 @@ public:
             if (input.empty())
                 continue;
 
+            if (input.find('|') != string::npos) {
 
-            vector<string> tokens = parseInput(input);
+                size_t pipePos = input.find('|');
 
-            string cmd = tokens[0];
+                string firstCommand = input.substr(0, pipePos);
+                string secondCommand = input.substr(pipePos + 1);
+
+                Command first = parseCommand(firstCommand);
+                Command second = parseCommand(secondCommand);
+
+                if (first.name.empty() || second.name.empty()) {
+                    cout << YELLOW
+                         << "Invalid pipe syntax."
+                         << RESET << endl;
+                    continue;
+                }
+
+                string pipedOutput;
+
+                if (first.name == "ls") {
+                    pipedOutput = listFiles();
+                }
+                else if (first.name == "tree") {
+                    pipedOutput = showTreeForSearch();
+                }
+
+                if (second.name == "search" && second.arguments.size() >= 1) {
+                    cout << searchFiles(second.arguments[0], pipedOutput);
+                }
+
+                continue;
+            }
+
+
+            Command command = parseCommand(input);
+
+            if (command.name.empty())
+                continue;
+
+            string cmd = command.name;
 
 
             if (cmd == "exit") {
@@ -111,38 +158,85 @@ public:
             }
 
 
-            if (commands.find(cmd) != commands.end()) {
-
-                commands[cmd](tokens);
-
-            } else {
+            if (commands.find(cmd) == commands.end()) {
 
                 cout << RED
                      << "Unknown command."
                      << RESET << "\n";
+
+                continue;
             }
+
+            if (!validateCommand(command))
+                continue;
+
+            commands[cmd](command.arguments);
         }
     }
 
 
 private:
 
-    vector<string> parseInput(const string& input) {
+    vector<string> parseInput(const string& input, bool& validQuotes) {
 
         vector<string> tokens;
+        string token;
+        bool insideQuotes = false;
 
-        stringstream ss(input);
+        for (char c : input) {
 
-        string word;
+            if (c == '"') {
+                insideQuotes = !insideQuotes;
+            }
 
+            else if (c == ' ' && !insideQuotes) {
 
-        while (ss >> word) {
+                if (!token.empty()) {
+                    tokens.push_back(token);
+                    token.clear();
+                }
+            }
 
-            tokens.push_back(word);
+            else {
+                token += c;
+            }
         }
 
+        if (!token.empty()) {
+            tokens.push_back(token);
+        }
+
+        validQuotes = !insideQuotes;
 
         return tokens;
+    }
+
+    Command parseCommand(const string& input) {
+
+        bool validQuotes;
+
+        vector<string> tokens = parseInput(input, validQuotes);
+
+        Command command;
+
+        if (!validQuotes) {
+            cout << YELLOW
+                 << "Error: Unclosed quotation mark."
+                 << RESET << endl;
+
+            return command;
+        }
+
+        if (tokens.empty())
+            return command;
+
+        command.name = tokens[0];
+
+        for (size_t i = 1; i < tokens.size(); i++) {
+            command.arguments.push_back(tokens[i]);
+        }
+
+        return command;
     }
 
     // ==================== COMMAND REGISTRY ====================
@@ -166,8 +260,24 @@ private:
 
         commands["ls"] = [this](vector<string>) {
 
-            listFiles();
+            string output = listFiles();
+
+            stringstream ss(output);
+            string line;
+
+            while (getline(ss, line)) {
+
+                if (line.rfind("[DIR]", 0) == 0)
+                    cout << BLUE << line << RESET << endl;
+
+                else if (line.rfind("[FILE]", 0) == 0)
+                    cout << GREEN << line << RESET << endl;
+
+                else
+                    cout << line << endl;
+            }
         };
+
 
         commands["tree"] = [this](vector<string>) {
         
@@ -175,9 +285,19 @@ private:
         };
 
 
+        commands["search"] = [this](vector<string> args) {
+            if (args.size() < 1) {
+                cout << YELLOW << "Usage: search <name>\n" << RESET;
+                return;
+            }
+
+            cout << searchFiles(args[0]);
+        };
+
+
         commands["cd"] = [this](vector<string> args) {
 
-            if (args.size() < 2) {
+            if (args.size() < 1) {
 
                 cout << YELLOW
                      << "Usage: cd <directory>"
@@ -186,13 +306,13 @@ private:
                 return;
             }
 
-            changeDirectory(args[1]);
+            changeDirectory(args[0]);
         };
 
 
         commands["mkdir"] = [this](vector<string> args) {
 
-            if (args.size() < 2) {
+            if (args.size() < 1) {
 
                 cout << YELLOW
                      << "Usage: mkdir <folder>"
@@ -201,13 +321,13 @@ private:
                 return;
             }
 
-            createFolder(args[1]);
+            createFolder(args[0]);
         };
 
 
         commands["touch"] = [this](vector<string> args) {
 
-            if (args.size() < 2) {
+            if (args.size() < 1) {
 
                 cout << YELLOW
                      << "Usage: touch <file>"
@@ -216,13 +336,13 @@ private:
                 return;
             }
 
-            createFile(args[1]);
+            createFile(args[0]);
         };
 
 
         commands["rm"] = [this](vector<string> args) {
 
-            if (args.size() < 2) {
+            if (args.size() < 1) {
 
                 cout << YELLOW
                      << "Usage: rm <path>"
@@ -231,13 +351,13 @@ private:
                 return;
             }
 
-            removeItem(args[1]);
+            removeItem(args[0]);
         };
 
 
         commands["rename"] = [this](vector<string> args) {
 
-            if (args.size() < 3) {
+            if (args.size() < 2) {
 
                 cout << YELLOW
                      << "Usage: rename <old> <new>"
@@ -246,13 +366,13 @@ private:
                 return;
             }
 
-            renameItem(args[1], args[2]);
+            renameItem(args[0], args[1]);
         };
 
 
         commands["cp"] = [this](vector<string> args) {
 
-            if (args.size() < 3) {
+            if (args.size() < 2) {
 
                 cout << YELLOW
                      << "Usage: cp <source> <destination>"
@@ -261,8 +381,20 @@ private:
                 return;
             }
 
-            copyFile(args[1], args[2]);
+            copyFile(args[0], args[1]);
         };
+
+        commandInfo["help"]   = {0, 0};
+        commandInfo["pwd"]    = {0, 0};
+        commandInfo["ls"]     = {0, 0};
+        commandInfo["tree"]   = {0, 0};
+        commandInfo["search"] = {1, 1};
+        commandInfo["cd"]     = {1, 1};
+        commandInfo["mkdir"]  = {1, 1};
+        commandInfo["touch"]  = {1, 1};
+        commandInfo["rm"]     = {1, 1};
+        commandInfo["rename"] = {2, 2};
+        commandInfo["cp"]     = {2, 2};
     }
 
     // ==================== HELP ====================
@@ -279,6 +411,7 @@ private:
         cout << "pwd                    -> Show current directory\n";
         cout << "ls                     -> List files/folders\n";
         cout << "tree                   -> Show directory tree\n";
+        cout << "search <name>          -> Search for files/folders\n";
         cout << "cd <dir>               -> Change directory\n";
         cout << "mkdir <name>           -> Create folder\n";
         cout << "touch <file>           -> Create file\n";
@@ -294,44 +427,31 @@ private:
 
     // ==================== LIST FILES ====================
 
-    void listFiles() {
+    string listFiles() {
+        string output;
 
         try {
-
-            for (const auto& entry :
-                 fs::directory_iterator(currentPath)) {
-
+            for (const auto& entry : fs::directory_iterator(currentPath)) {
 
                 if (fs::is_directory(entry.path())) {
-
-                    cout << BLUE
-                         << "[DIR]  "
-                         << entry.path().filename().string()
-                         << RESET
-                         << endl;
-
+                    output += "[DIR]  " +
+                              entry.path().filename().string() +
+                              "\n";
                 }
-
                 else {
-
-                    cout << GREEN
-                         << "[FILE] "
-                         << entry.path().filename().string()
-                         << RESET
-                         << endl;
+                    output += "[FILE] " +
+                              entry.path().filename().string() +
+                              "\n";
                 }
             }
         }
-
-
         catch (exception& e) {
-
-            cout << RED
-                 << "Error: "
+            cout << RED << "Error: "
                  << e.what()
-                 << RESET
-                 << endl;
+                 << RESET << endl;
         }
+
+        return output;
     }
 
     // ==================== TREE =============================
@@ -376,6 +496,98 @@ private:
                      << RESET << endl;
             }
         }
+    }
+
+    string showTreeForSearch() {
+
+        string output;
+
+        try {
+            for (const auto& entry :
+                fs::recursive_directory_iterator(currentPath)) {
+
+                if (entry.path().filename() == ".git")
+                    continue;
+
+                fs::path relativePath =
+                    fs::relative(entry.path(), currentPath);
+
+                if (fs::is_directory(entry.path())) {
+                    output += "[DIR]  " +
+                            relativePath.string() +
+                            "\n";
+                }
+                else {
+                    output += "[FILE] " +
+                              relativePath.string() +
+                              "\n";
+                }
+            }
+        }
+        catch (exception& e) {
+            output += "Error: ";
+            output += e.what();
+            output += "\n";
+        }
+
+        return output;
+    }
+
+        // ==================== SEARCH FILE ======================
+
+    string searchFiles(const string& keyword, const string& input = "") {
+
+        string output;
+
+        try {
+
+            // Normal search: search the filesystem
+            if (input.empty()) {
+
+                for (const auto& entry :
+                     fs::recursive_directory_iterator(currentPath)) {
+
+                    string name =
+                        entry.path().filename().string();
+
+                    if (name.find(keyword) != string::npos) {
+
+                        if (fs::is_directory(entry.path())) {
+                            output += "[DIR]  " +
+                                  entry.path().string() +
+                                  "\n";
+                    }
+                    else {
+                        output += "[FILE] " +
+                                      entry.path().string() +
+                                      "\n";
+                        }
+                    }
+                }
+            }
+
+            else {
+
+                stringstream ss(input);
+                string line;
+
+                while (getline(ss, line)) {
+
+                    if (line.find(keyword) != string::npos) {
+                        output += line + "\n";
+                    }
+                }
+            }
+        }
+
+        catch (exception& e) {
+            cout << RED
+                 << "Error: "
+                 << e.what()
+                 << RESET << endl;
+        }
+
+        return output;
     }
 
     // ==================== CHANGE DIRECTORY ====================
@@ -558,9 +770,36 @@ private:
                  << endl;
         }
     }
+
+    bool validateCommand(const Command& command) {
+
+        auto it = commandInfo.find(command.name);
+
+        if (it == commandInfo.end())
+            return false;
+
+        int argumentCount = command.arguments.size();
+
+        if (argumentCount < it->second.minArguments ||
+            argumentCount > it->second.maxArguments) {
+
+            cout << YELLOW
+                 << "Invalid number of arguments for '"
+                 << command.name
+                 << "'."
+                 << RESET << endl;
+
+            return false;
+        }
+
+        return true;
+    }
 };
 
 int main() {
+
+    SetConsoleOutputCP(CP_UTF8);
+
     CLIFileManager manager;
     manager.start();
     return 0;
