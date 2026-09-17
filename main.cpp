@@ -13,6 +13,9 @@ FEATURES
 - rm          -> Remove file/folder
 - rename      -> Rename file/folder
 - cp          -> Copy file
+- search      -> Search files
+- tree        -> Display directory tree
+- reindex     -> Rebuild file index
 - help        -> Show commands
 - exit        -> Quit program
 
@@ -22,6 +25,33 @@ LEVEL 1
 - Colored files
 - Colored success/error messages
 
+LEVEL 2
+- Recursive directory tree
+- UTF-8 tree visualization
+
+LEVEL 3
+- Recursive file search
+
+LEVEL 4
+- Command piping
+- ls | search
+- tree | search
+
+LEVEL 5
+- Command parser
+- Quoted arguments
+- Quote validation
+- Argument validation
+- Command registry
+
+LEVEL 6
+- File indexing
+- Indexed search
+- Background indexing using std::thread
+- Thread-safe index using std::mutex
+- Automatic index updates after file operations
+- Manual index rebuilding with reindex
+
 Compile:
 g++ -std=c++17 main.cpp -o filemanager
 
@@ -29,6 +59,7 @@ Run:
 ./filemanager
 ========================================================
 */
+
 
 #include <iostream>
 #include <filesystem>
@@ -38,6 +69,9 @@ Run:
 #include <sstream>
 #include <vector>
 #include <windows.h>
+#include <thread>
+#include <mutex>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 using namespace std;
@@ -63,6 +97,12 @@ struct CommandInfo {
     int maxArguments;
 };
 
+struct FileEntry {
+    string name;
+    fs::path path;
+    bool isDirectory;
+};
+
 class CLIFileManager {
 
 private:
@@ -71,6 +111,9 @@ private:
 
     unordered_map<string, function<void(vector<string>)>> commands;
     unordered_map<string, CommandInfo> commandInfo;
+    vector<FileEntry> fileIndex;
+    mutex indexMutex;
+    thread indexingThread;
 
 public:
 
@@ -79,6 +122,8 @@ public:
         currentPath = fs::current_path();
 
         registerCommands();
+
+        indexingThread = thread(&CLIFileManager::buildIndex,this);
     }
 
     void start() {
@@ -139,14 +184,12 @@ public:
                 continue;
             }
 
-
             Command command = parseCommand(input);
 
             if (command.name.empty())
                 continue;
 
             string cmd = command.name;
-
 
             if (cmd == "exit") {
 
@@ -156,7 +199,6 @@ public:
 
                 break;
             }
-
 
             if (commands.find(cmd) == commands.end()) {
 
@@ -174,6 +216,11 @@ public:
         }
     }
 
+    ~CLIFileManager() {
+        if (indexingThread.joinable()) {
+            indexingThread.join();
+        }
+    }
 
 private:
 
@@ -384,6 +431,17 @@ private:
             copyFile(args[0], args[1]);
         };
 
+        commands["reindex"] = [this](vector<string>) {
+        
+            buildIndex();
+
+            cout << GREEN
+                 << "Index rebuilt successfully."
+                 << RESET
+                 << "\n";
+        };
+
+
         commandInfo["help"]   = {0, 0};
         commandInfo["pwd"]    = {0, 0};
         commandInfo["ls"]     = {0, 0};
@@ -395,6 +453,7 @@ private:
         commandInfo["rm"]     = {1, 1};
         commandInfo["rename"] = {2, 2};
         commandInfo["cp"]     = {2, 2};
+        commandInfo["reindex"] = {0, 0};
     }
 
     // ==================== HELP ====================
@@ -418,12 +477,12 @@ private:
         cout << "rm <path>              -> Delete file/folder\n";
         cout << "rename <old> <new>     -> Rename item\n";
         cout << "cp <src> <dest>        -> Copy file\n";
+        cout << "reindex                -> Rebuild file index\n";
         cout << "help                   -> Show help\n";
         cout << "exit                   -> Quit\n";
 
         cout << "----------------------------------\n\n";
     }
-
 
     // ==================== LIST FILES ====================
 
@@ -431,6 +490,7 @@ private:
         string output;
 
         try {
+
             for (const auto& entry : fs::directory_iterator(currentPath)) {
 
                 if (fs::is_directory(entry.path())) {
@@ -445,7 +505,9 @@ private:
                 }
             }
         }
+
         catch (exception& e) {
+
             cout << RED << "Error: "
                  << e.what()
                  << RESET << endl;
@@ -454,16 +516,19 @@ private:
         return output;
     }
 
-    // ==================== TREE =============================
+    // ==================== TREE ====================
 
     void showTree() {
         try {
+
             cout << CYAN << currentPath.filename().string()
                  << RESET << endl;
 
             showTreeRecursive(currentPath, "");
         }
+
         catch (exception& e) {
+
             cout << RED << "Error: "
                  << e.what()
                  << RESET << endl;
@@ -483,10 +548,7 @@ private:
                      << entry.path().filename().string()
                      << RESET << endl;
 
-                showTreeRecursive(
-                    entry.path(),
-                    prefix + "│   "
-                );
+                showTreeRecursive(entry.path(), prefix + "│   ");
             }
             else {
 
@@ -503,6 +565,7 @@ private:
         string output;
 
         try {
+
             for (const auto& entry :
                 fs::recursive_directory_iterator(currentPath)) {
 
@@ -524,7 +587,9 @@ private:
                 }
             }
         }
+
         catch (exception& e) {
+
             output += "Error: ";
             output += e.what();
             output += "\n";
@@ -533,7 +598,7 @@ private:
         return output;
     }
 
-        // ==================== SEARCH FILE ======================
+    // ==================== SEARCH FILE ====================
 
     string searchFiles(const string& keyword, const string& input = "") {
 
@@ -541,27 +606,14 @@ private:
 
         try {
 
-            // Normal search: search the filesystem
             if (input.empty()) {
 
-                for (const auto& entry :
-                     fs::recursive_directory_iterator(currentPath)) {
+                lock_guard<mutex> lock(indexMutex);
 
-                    string name =
-                        entry.path().filename().string();
+                for (const auto& file : fileIndex) {
 
-                    if (name.find(keyword) != string::npos) {
-
-                        if (fs::is_directory(entry.path())) {
-                            output += "[DIR]  " +
-                                  entry.path().string() +
-                                  "\n";
-                    }
-                    else {
-                        output += "[FILE] " +
-                                      entry.path().string() +
-                                      "\n";
-                        }
+                    if (file.name.find(keyword) != string::npos) {
+                        output += file.path.string() + "\n";
                     }
                 }
             }
@@ -581,6 +633,7 @@ private:
         }
 
         catch (exception& e) {
+
             cout << RED
                  << "Error: "
                  << e.what()
@@ -596,9 +649,7 @@ private:
 
         fs::path newPath = currentPath / dir;
 
-
-        if (fs::exists(newPath) &&
-            fs::is_directory(newPath)) {
+        if (fs::exists(newPath) && fs::is_directory(newPath)) {
 
             currentPath = fs::canonical(newPath);
         }
@@ -618,16 +669,33 @@ private:
 
         try {
 
-            fs::create_directory(
-                currentPath / folderName
-            );
+            fs::path folderPath = currentPath / folderName;
 
-            cout << GREEN
-                 << "Folder created."
-                 << RESET
-                 << "\n";
+            if (fs::exists(folderPath)) {
+                cout << YELLOW
+                     << "Folder already exists."
+                     << RESET << "\n";
+                return;
+            }
+
+            if (fs::create_directory(folderPath)) {
+
+                {
+                    lock_guard<mutex> lock(indexMutex);
+
+                    FileEntry entry;
+                    entry.name = folderName;
+                    entry.path = folderPath;
+                    entry.isDirectory = true;
+
+                    fileIndex.push_back(entry);
+                }
+
+                cout << GREEN
+                     << "Folder created."
+                     << RESET << "\n";
+            }
         }
-
 
         catch (exception& e) {
 
@@ -645,31 +713,44 @@ private:
 
         try {
 
-            ofstream file(
-                currentPath / fileName
-            );
+            fs::path filePath = currentPath / fileName;
 
+            if (fs::exists(filePath)) {
+                cout << YELLOW
+                     << "File already exists."
+                     << RESET << "\n";
+                return;
+            }
+
+            ofstream file(filePath);
 
             if (file) {
 
+                file.close();
+
+                {
+                    lock_guard<mutex> lock(indexMutex);
+
+                    FileEntry entry;
+                    entry.name = fileName;
+                    entry.path = filePath;
+                    entry.isDirectory = false;
+
+                    fileIndex.push_back(entry);
+                }
+
                 cout << GREEN
                      << "File created."
-                     << RESET
-                     << "\n";
+                     << RESET << "\n";
             }
 
             else {
 
                 cout << RED
                      << "Failed to create file."
-                     << RESET
-                     << "\n";
+                     << RESET << "\n";
             }
-
-
-            file.close();
         }
-
 
         catch (exception& e) {
 
@@ -687,16 +768,40 @@ private:
 
         try {
 
-            fs::remove_all(
-                currentPath / name
-            );
+            fs::path target = currentPath / name;
+
+            if (!fs::exists(target)) {
+                cout << YELLOW
+                     << "File or folder not found."
+                     << RESET << "\n";
+                return;
+            }
+
+            fs::remove_all(target);
+
+            {
+                lock_guard<mutex> lock(indexMutex);
+
+                fileIndex.erase(
+                    remove_if(
+                        fileIndex.begin(),
+                        fileIndex.end(),
+                        [&](const FileEntry& entry) {
+
+                            return entry.path == target ||
+                                   entry.path.string().find(
+                                       target.string() + "\\"
+                                   ) == 0;
+                        }
+                    ),
+                    fileIndex.end()
+                );
+            }
 
             cout << GREEN
                  << "Removed successfully."
-                 << RESET
-                 << "\n";
+                 << RESET << "\n";
         }
-
 
         catch (exception& e) {
 
@@ -710,24 +815,40 @@ private:
 
     // ==================== RENAME ====================
 
-    void renameItem(
-        const string& oldName,
-        const string& newName
-    ) {
+    void renameItem(const string& oldName,const string& newName) {
 
         try {
 
-            fs::rename(
-                currentPath / oldName,
-                currentPath / newName
-            );
+            fs::path oldPath = currentPath / oldName;
+            fs::path newPath = currentPath / newName;
+
+            fs::rename(oldPath, newPath);
+
+            {
+                lock_guard<mutex> lock(indexMutex);
+
+                for (auto& entry : fileIndex) {
+
+                    if (entry.path == oldPath) {
+
+                        entry.name = newName;
+                        entry.path = newPath;
+                    }
+
+                    else if (entry.path.string().find(oldPath.string() + "\\") == 0) {
+
+                        string relativePart = entry.path.string().substr(oldPath.string().length());
+
+                        entry.path = newPath.string() + relativePart;
+                    }
+                }
+            }
 
             cout << GREEN
                  << "Renamed successfully."
                  << RESET
                  << "\n";
         }
-
 
         catch (exception& e) {
 
@@ -741,25 +862,46 @@ private:
 
     // ==================== COPY FILE ====================
 
-    void copyFile(
-        const string& src,
-        const string& dest
-    ) {
+    void copyFile(const string& src,const string& dest) {
 
         try {
 
+            fs::path sourcePath = currentPath / src;
+            fs::path destinationPath = currentPath / dest;
+
             fs::copy_file(
-                currentPath / src,
-                currentPath / dest,
+                sourcePath,
+                destinationPath,
                 fs::copy_options::overwrite_existing
             );
+
+            {
+                lock_guard<mutex> lock(indexMutex);
+
+                fileIndex.erase(
+                    remove_if(
+                        fileIndex.begin(),
+                        fileIndex.end(),
+                        [&](const FileEntry& entry) {
+                            return entry.path == destinationPath;
+                        }
+                    ),
+                    fileIndex.end()
+                );
+
+                FileEntry entry;
+                entry.name = destinationPath.filename().string();
+                entry.path = destinationPath;
+                entry.isDirectory = false;
+
+                fileIndex.push_back(entry);
+            }
 
             cout << GREEN
                  << "File copied successfully."
                  << RESET
                  << "\n";
         }
-
 
         catch (exception& e) {
 
@@ -780,8 +922,7 @@ private:
 
         int argumentCount = command.arguments.size();
 
-        if (argumentCount < it->second.minArguments ||
-            argumentCount > it->second.maxArguments) {
+        if (argumentCount < it->second.minArguments || argumentCount > it->second.maxArguments) {
 
             cout << YELLOW
                  << "Invalid number of arguments for '"
@@ -793,6 +934,42 @@ private:
         }
 
         return true;
+    }
+
+    void buildIndex() {
+        
+        lock_guard<mutex> lock(indexMutex);
+
+        fileIndex.clear();
+
+        try {
+
+            for (auto it = fs::recursive_directory_iterator(currentPath);
+                it != fs::recursive_directory_iterator();
+                ++it) {
+
+                if (it->path().filename() == ".git") {
+                    if (it->is_directory())
+                        it.disable_recursion_pending();
+                    continue;
+                }
+
+                FileEntry file;
+                file.name = it->path().filename().string();
+                file.path = it->path();
+                file.isDirectory = it->is_directory();
+
+                fileIndex.push_back(file);
+            }
+        }
+
+        catch (const fs::filesystem_error& e) {
+
+            cout << RED
+                 << "Indexing error: "
+                 << e.what()
+                 << RESET << endl;
+        }
     }
 };
 
